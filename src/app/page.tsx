@@ -5,16 +5,9 @@ import React from 'react'
 
 const HomePage = () => {
   return (
+    
     <div>
-      HomePage
-
-      <SignedIn>
-      <SignOutButton />
-      </SignedIn>
-
-      <SignedOut>
-      <SignInButton />
-      </SignedOut>
+    
       
     </div>
   )
