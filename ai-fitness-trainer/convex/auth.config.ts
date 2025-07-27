@@ -1,14 +1,19 @@
+
 const authConfig = {
   providers: [
-    // Uncomment this once you have set up a Clerk app
-    // {
-    //   // Replace with your own Clerk Issuer URL from your "convex" JWT template
-    //   // or with `process.env.CLERK_JWT_ISSUER_DOMAIN`
-    //   // and configure CLERK_JWT_ISSUER_DOMAIN on the Convex Dashboard
-    //   // See https://docs.convex.dev/auth/clerk#configuring-dev-and-prod-instances
-    //   domain: process.env.CLERK_JWT_ISSUER_DOMAIN,
-    //   applicationID: "convex",
-    // },
+    {
+  "aud": "convex",
+  "email": "{{user.primary_email_address}}",
+  "email_verified": "{{user.email_verified}}",
+  "family_name": "{{user.last_name}}",
+  "given_name": "{{user.first_name}}",
+  "name": "{{user.full_name}}",
+  "nickname": "{{user.username}}",
+  "phone_number": "{{user.primary_phone_number}}",
+  "phone_number_verified": "{{user.phone_number_verified}}",
+  "picture": "{{user.image_url}}",
+  "updated_at": "{{user.updated_at}}"
+}
   ],
 };
 
