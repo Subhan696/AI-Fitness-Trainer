@@ -1,140 +1,171 @@
-"use client"
-import React, { use, useEffect, useState } from 'react'
-import { useUser } from '@clerk/nextjs';
-import { useRouter } from 'next/navigation';
-import { vapi } from '@/lib/vapi';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-// Removed incorrect setTimeout import; use the global setTimeout instead.
+"use client";
+
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { vapi } from "@/lib/vapi";
+import { useUser } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 const GenerateProgramPage = () => {
-  const[callActive,setCallActive] = useState(false);
+  const [callActive, setCallActive] = useState(false);
   const [connecting, setConnecting] = useState(false);
-  const[isSpeaking, setIsSpeaking] = useState(false);
-  const[messages, setMessages] = useState<any[]>([]);
-  const[callEnded, setCallEnded] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [callEnded, setCallEnded] = useState(false);
 
-  const {user}=useUser();
+  const { user } = useUser();
   const router = useRouter();
 
-  const messageContainerRef = React.useRef<HTMLDivElement>(null);
+  const messageContainerRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() =>
-    {
-      if(callEnded){
-        const redirectTimer=setTimeout(() => {
-          router.push("/profile");
-        },1500);
-    return () => 
-      clearTimeout(redirectTimer);
-}},[callEnded, router]);
-
-useEffect(() =>
-   {
-    if(messageContainerRef.current){
-        messageContainerRef.current.scrollTop = messageContainerRef.current.scrollHeight;
+  // SOLUTION to get rid of "Meeting has ended" error
+  useEffect(() => {
+    const originalError = console.error;
+    // override console.error to ignore "Meeting has ended" errors
+    console.error = function (msg, ...args) {
+      if (
+        msg &&
+        (msg.includes("Meeting has ended") ||
+          (args[0] && args[0].toString().includes("Meeting has ended")))
+      ) {
+        console.log("Ignoring known error: Meeting has ended");
+        return; // don't pass to original handler
       }
 
-   },[messages]);
+      // pass all other errors to the original handler
+      return originalError.call(console, msg, ...args);
+    };
 
-   useEffect(() => {
+    // restore original handler on unmount
+    return () => {
+      console.error = originalError;
+    };
+  }, []);
+
+  // auto-scroll messages
+  useEffect(() => {
+    if (messageContainerRef.current) {
+      messageContainerRef.current.scrollTop = messageContainerRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  // navigate user to profile page after the call ends
+  useEffect(() => {
+    if (callEnded) {
+      const redirectTimer = setTimeout(() => {
+        router.push("/profile");
+      }, 1500);
+
+      return () => clearTimeout(redirectTimer);
+    }
+  }, [callEnded, router]);
+
+  // setup event listeners for vapi
+  useEffect(() => {
     const handleCallStart = () => {
       console.log("Call started");
-      setCallActive(true);
       setConnecting(false);
+      setCallActive(true);
       setCallEnded(false);
-      
-    }
+    };
+
     const handleCallEnd = () => {
       console.log("Call ended");
       setCallActive(false);
       setConnecting(false);
       setIsSpeaking(false);
       setCallEnded(true);
-    }
-    const handelSpeechStart = () => {
+    };
+
+    const handleSpeechStart = () => {
       console.log("AI started Speaking");
       setIsSpeaking(true);
-    }
+    };
+
     const handleSpeechEnd = () => {
       console.log("AI stopped Speaking");
       setIsSpeaking(false);
-    }
+    };
     const handleMessage = (message: any) => {
       if (message.type === "transcript" && message.transcriptType === "final") {
-      const newMessage={content: message.transcript, role: message.role};
-      setMessages((prevMessages) => [...prevMessages, newMessage]);
+        const newMessage = { content: message.transcript, role: message.role };
+        setMessages((prev) => [...prev, newMessage]);
       }
-    }
-
+    };
 
     const handleError = (error: any) => {
-      console.error("Vapi Error:", error);
+      console.log("Vapi Error", error);
       setConnecting(false);
       setCallActive(false);
-      
-    }
-
-    vapi.on("call-start", handleCallStart);
-    vapi.on("call-end", handleCallEnd);
-    vapi.on("speech-start", handelSpeechStart);
-    vapi.on("speech-end", handleSpeechEnd);
-    vapi.on("message", handleMessage);
-    vapi.on("error", handleError);
-
-    return () => {
-      vapi.off("call-start", handleCallStart);
-      vapi.off("call-end", handleCallEnd);
-      vapi.off("speech-start", handelSpeechStart);
-      vapi.off("speech-end", handleSpeechEnd);
-      vapi.off("message", handleMessage);
-      vapi.off("error", handleError);
     };
-   },[]);
 
-   const toggleCall = async () => {
-    if(callActive) vapi.stop();
+    vapi
+      .on("call-start", handleCallStart)
+      .on("call-end", handleCallEnd)
+      .on("speech-start", handleSpeechStart)
+      .on("speech-end", handleSpeechEnd)
+      .on("message", handleMessage)
+      .on("error", handleError);
+
+    // cleanup event listeners on unmount
+    return () => {
+      vapi
+        .off("call-start", handleCallStart)
+        .off("call-end", handleCallEnd)
+        .off("speech-start", handleSpeechStart)
+        .off("speech-end", handleSpeechEnd)
+        .off("message", handleMessage)
+        .off("error", handleError);
+    };
+  }, []);
+
+  const toggleCall = async () => {
+    if (callActive) vapi.stop();
     else {
-      try
-      {
+      try {
         setConnecting(true);
         setMessages([]);
         setCallEnded(false);
 
-        const fullName = user?.fullName ?'${user.firstName} ${user.lastName} || ""}'.trim() : "There";
+        const fullName = user?.firstName
+          ? `${user.firstName} ${user.lastName || ""}`.trim()
+          : "There";
+
         await vapi.start(process.env.NEXT_PUBLIC_VAPI_WORKFLOW_ID!, {
-          variableValues:{user_id: user?.id,
-          full_name: fullName,
+          variableValues: {
+            full_name: fullName,
+            user_id: user?.id,
           },
         });
-      }catch(error) {
-        console.error("Error starting Vapi call:", error);
+      } catch (error) {
+        console.log("Failed to start call", error);
         setConnecting(false);
       }
     }
   };
 
   return (
-    <div className='flex flex-cool min-h-screen text-foreground overflow-hidden pb-6 pt-24'>
-      <div className='container mx-auto px-4 h-full max-w-5xl'>
-        {/*Title */}
-        <div className='text-center mb-8'>
-          <h1 className='text-3xl font-black font-mono'>
-            <span>Generate Your</span>
-            <span className='text-primary uppercase'> Fitness Program</span> 
+    <div className="flex flex-col min-h-screen text-foreground overflow-hidden  pb-6 pt-24">
+      <div className="container mx-auto px-4 h-full max-w-5xl">
+        {/* Title */}
+        <div className="text-center mb-8">
+          <h1 className="text-3xl font-bold font-mono">
+            <span>Generate Your </span>
+            <span className="text-primary uppercase">Fitness Program</span>
           </h1>
-<p className='text-muted-foreground mt-2'>
-  Have a vocal Conversaton with our AI Assistant to create your personalized plan
-</p>
+          <p className="text-muted-foreground mt-2">
+            Have a voice conversation with our AI assistant to create your personalized plan
+          </p>
         </div>
 
-        {/* Video call area*/}
-        <div className='grid grid-cols-1 md:grid-cols-2 gap-6 mb-8'>
-          {/*AI assistant card */}
-          <Card className='bg-card/90 backdrop-blur-sm border-border overflow-hidden relative'>
-          <div className='aspect-video flex flex-col items-center justify-center p-6 relative'>
-            {/*AI Voice Animation */}
-             <div
+        {/* VIDEO CALL AREA */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+          {/* AI ASSISTANT CARD */}
+          <Card className="bg-card/90 backdrop-blur-sm border border-border overflow-hidden relative">
+            <div className="aspect-video flex flex-col items-center justify-center p-6 relative">
+              {/* AI VOICE ANIMATION */}
+              <div
                 className={`absolute inset-0 ${
                   isSpeaking ? "opacity-30" : "opacity-0"
                 } transition-opacity duration-300`}
@@ -200,10 +231,10 @@ useEffect(() =>
                         : "Waiting..."}
                 </span>
               </div>
-
             </div>
-            </Card>
-             {/* USER CARD */}
+          </Card>
+
+          {/* USER CARD */}
           <Card className={`bg-card/90 backdrop-blur-sm border overflow-hidden relative`}>
             <div className="aspect-video flex flex-col items-center justify-center p-6 relative">
               {/* User Image */}
@@ -285,14 +316,9 @@ useEffect(() =>
                     : "Start Call"}
             </span>
           </Button>
-
         </div>
-        </div>
-        </div>
-
-      
-      
-      )
-}
-
+      </div>
+    </div>
+  );
+};
 export default GenerateProgramPage;
