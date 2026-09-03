@@ -119,37 +119,91 @@ function validateDietPlan(plan: any) {
   return validatedPlan;
 }
 
+async function generateWithGemini(prompt: string) {
+  const candidateModels = [
+    "gemini-3.6-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3.5-flash",
+    "gemini-3.5-pro",
+  ];
+  let lastError: any;
+
+  for (const modelName of candidateModels) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            temperature: 0.4,
+            topP: 0.9,
+            responseMimeType: "application/json",
+          },
+        });
+        const result = await model.generateContent(prompt);
+        return result.response.text();
+      } catch (err: any) {
+        lastError = err;
+        const is503 = err?.message?.includes("503") || err?.status === 503;
+        if (is503 && attempt === 0) {
+          console.log(`Model ${modelName} encountered 503 temporary demand spike, retrying in 600ms...`);
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          continue;
+        }
+        console.warn(`Model ${modelName} failed, trying next candidate:`, err?.message || err);
+        break;
+      }
+    }
+  }
+
+  throw lastError || new Error("All Gemini candidate models failed");
+}
+
 http.route({
   path: "/vapi/generate-program",
   method: "POST",
   handler: httpAction(async (ctx, request) => {
     try {
       const payload = await request.json();
+      console.log("Payload received:", JSON.stringify(payload, null, 2));
+
+      // Handle both direct payloads and Vapi tool-calls payloads
+      let args: any = payload;
+      let toolCallId: string | undefined;
+
+      if (payload.message?.toolCalls?.[0]?.function?.arguments) {
+        toolCallId = payload.message.toolCalls[0].id;
+        const rawArgs = payload.message.toolCalls[0].function.arguments;
+        args = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
+      } else if (payload.message?.toolWithToolCallList?.[0]?.toolCall?.function?.arguments) {
+        toolCallId = payload.message.toolWithToolCallList[0].toolCall.id;
+        const rawArgs = payload.message.toolWithToolCallList[0].toolCall.function.arguments;
+        args = typeof rawArgs === "string" ? JSON.parse(rawArgs) : rawArgs;
+      }
+
+      // Prioritize the actual Clerk user_id passed in Vapi variables over tool placeholder args
+      const user_id =
+        payload.message?.variableValues?.user_id ||
+        payload.message?.artifact?.variableValues?.user_id ||
+        payload.message?.call?.assistantOverrides?.variableValues?.user_id ||
+        payload.user_id ||
+        (args.user_id && args.user_id !== "user123" && !args.user_id.includes("{{") ? args.user_id : null);
 
       const {
-        user_id,
-        age,
-        height,
-        weight,
-        injuries,
-        workout_days,
-        fitness_goal,
-        fitness_level,
-        dietary_restrictions,
-      } = payload;
+        age = 25,
+        height = "Not specified",
+        weight = "Not specified",
+        injuries = "None",
+        workout_days = 4,
+        fitness_goal = "General Fitness",
+        fitness_level = "Intermediate",
+        dietary_restrictions = "None",
+      } = args;
 
-      console.log("Payload is here:", payload);
+      if (!user_id) {
+        throw new Error("Missing user_id in payload or variables");
+      }
 
-      const model = genAI.getGenerativeModel({
-        model: "gemini-2.0-flash-001",
-        generationConfig: {
-          temperature: 0.4, // lower temperature for more predictable outputs
-          topP: 0.9,
-          responseMimeType: "application/json",
-        },
-      });
-
-      const workoutPrompt = `You are an experienced fitness coach creating a personalized workout plan based on:
+      const combinedPrompt = `You are an experienced fitness and nutrition coach creating a personalized workout and diet plan based on:
       Age: ${age}
       Height: ${height}
       Weight: ${weight}
@@ -157,71 +211,34 @@ http.route({
       Available days for workout: ${workout_days}
       Fitness goal: ${fitness_goal}
       Fitness level: ${fitness_level}
-      
-      As a professional coach:
-      - Consider muscle group splits to avoid overtraining the same muscles on consecutive days
-      - Design exercises that match the fitness level and account for any injuries
-      - Structure the workouts to specifically target the user's fitness goal
+      Dietary restrictions: ${dietary_restrictions}
       
       CRITICAL SCHEMA INSTRUCTIONS:
-      - Your output MUST contain ONLY the fields specified below, NO ADDITIONAL FIELDS
-      - "sets" and "reps" MUST ALWAYS be NUMBERS, never strings
-      - For example: "sets": 3, "reps": 10
-      - Do NOT use text like "reps": "As many as possible" or "reps": "To failure"
-      - Instead use specific numbers like "reps": 12 or "reps": 15
-      - For cardio, use "sets": 1, "reps": 1 or another appropriate number
-      - NEVER include strings for numerical fields
-      - NEVER add extra fields not shown in the example below
+      - Return ONLY a valid JSON object with the exact keys "workoutPlan" and "dietPlan".
+      - "sets" and "reps" MUST ALWAYS be NUMBERS, never strings (e.g. "sets": 3, "reps": 10).
+      - "dailyCalories" MUST ALWAYS be a NUMBER, never a string (e.g. "dailyCalories": 2200).
+      - Each meal must have ONLY "name" and "foods" array.
+      - DO NOT add extra keys, notes, markdown formatting, or text outside the JSON.
       
       Return a JSON object with this EXACT structure:
       {
-        "schedule": ["Monday", "Wednesday", "Friday"],
-        "exercises": [
-          {
-            "day": "Monday",
-            "routines": [
-              {
-                "name": "Exercise Name",
-                "sets": 3,
-                "reps": 10
-              }
-            ]
-          }
-        ]
-      }
-      
-      DO NOT add any fields that are not in this example. Your response must be a valid JSON object with no additional text.`;
-
-      const workoutResult = await model.generateContent(workoutPrompt);
-      const workoutPlanText = workoutResult.response.text();
-
-      // VALIDATE THE INPUT COMING FROM AI
-      let workoutPlan = JSON.parse(workoutPlanText);
-      workoutPlan = validateWorkoutPlan(workoutPlan);
-
-      const dietPrompt = `You are an experienced nutrition coach creating a personalized diet plan based on:
-        Age: ${age}
-        Height: ${height}
-        Weight: ${weight}
-        Fitness goal: ${fitness_goal}
-        Dietary restrictions: ${dietary_restrictions}
-        
-        As a professional nutrition coach:
-        - Calculate appropriate daily calorie intake based on the person's stats and goals
-        - Create a balanced meal plan with proper macronutrient distribution
-        - Include a variety of nutrient-dense foods while respecting dietary restrictions
-        - Consider meal timing around workouts for optimal performance and recovery
-        
-        CRITICAL SCHEMA INSTRUCTIONS:
-        - Your output MUST contain ONLY the fields specified below, NO ADDITIONAL FIELDS
-        - "dailyCalories" MUST be a NUMBER, not a string
-        - DO NOT add fields like "supplements", "macros", "notes", or ANYTHING else
-        - ONLY include the EXACT fields shown in the example below
-        - Each meal should include ONLY a "name" and "foods" array
-
-        Return a JSON object with this EXACT structure and no other fields:
-        {
-          "dailyCalories": 2000,
+        "workoutPlan": {
+          "schedule": ["Monday", "Tuesday", "Thursday", "Friday", "Saturday"],
+          "exercises": [
+            {
+              "day": "Monday",
+              "routines": [
+                {
+                  "name": "Bench Press",
+                  "sets": 3,
+                  "reps": 10
+                }
+              ]
+            }
+          ]
+        },
+        "dietPlan": {
+          "dailyCalories": 2200,
           "meals": [
             {
               "name": "Breakfast",
@@ -230,18 +247,21 @@ http.route({
             {
               "name": "Lunch",
               "foods": ["Grilled chicken salad", "Whole grain bread", "Water"]
+            },
+            {
+              "name": "Dinner",
+              "foods": ["Grilled salmon", "Steamed rice", "Broccoli"]
             }
           ]
         }
-        
-        DO NOT add any fields that are not in this example. Your response must be a valid JSON object with no additional text.`;
+      }`;
 
-      const dietResult = await model.generateContent(dietPrompt);
-      const dietPlanText = dietResult.response.text();
+      const generatedPlanText = await generateWithGemini(combinedPrompt);
+      const generatedPlanJson = JSON.parse(generatedPlanText);
 
       // VALIDATE THE INPUT COMING FROM AI
-      let dietPlan = JSON.parse(dietPlanText);
-      dietPlan = validateDietPlan(dietPlan);
+      const workoutPlan = validateWorkoutPlan(generatedPlanJson.workoutPlan || generatedPlanJson);
+      const dietPlan = validateDietPlan(generatedPlanJson.dietPlan || generatedPlanJson);
 
       // save to our DB: CONVEX
       const planId = await ctx.runMutation(api.plans.createPlan, {
@@ -252,20 +272,28 @@ http.route({
         name: `${fitness_goal} Plan - ${new Date().toLocaleDateString()}`,
       });
 
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            planId,
-            workoutPlan,
-            dietPlan,
-          },
-        }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }
-      );
+      const responseBody = {
+        success: true,
+        data: {
+          planId,
+          workoutPlan,
+          dietPlan,
+        },
+        // If Vapi expects tool results format
+        results: toolCallId
+          ? [
+              {
+                toolCallId,
+                result: `Successfully generated workout and diet plan for ${fitness_goal}.`,
+              },
+            ]
+          : undefined,
+      };
+
+      return new Response(JSON.stringify(responseBody), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     } catch (error) {
       console.error("Error generating fitness plan:", error);
       return new Response(
