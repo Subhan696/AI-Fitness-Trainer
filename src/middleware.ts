@@ -3,9 +3,14 @@ import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
 
 const isProtectedRoute = createRouteMatcher(["/generate-program", "/profile"]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (isProtectedRoute(req)) await auth.protect();
-});
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (isProtectedRoute(req)) await auth.protect();
+  },
+  {
+    proxyUrl: process.env.NEXT_PUBLIC_CLERK_PROXY_URL,
+  }
+);
 
 export const config = {
   matcher: [
